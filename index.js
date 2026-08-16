@@ -5,9 +5,12 @@ const {
 } = require("discord.js");
 require("dotenv").config();
 
-const { BOT_TOKEN, SERVER_ID, STAFF_ROLE_ID, TICKET_CATEGORY_ID } = process.env;
+const { BOT_TOKEN, SERVER_ID, TICKET_CATEGORY_ID } = process.env;
 
-const missing = ["BOT_TOKEN", "SERVER_ID", "STAFF_ROLE_ID", "TICKET_CATEGORY_ID"]
+// ยศแอดมินที่สามารถตอบ Ticket ได้
+const STAFF_ROLE_ID = "1516789795832070315";
+
+const missing = ["BOT_TOKEN", "SERVER_ID", "TICKET_CATEGORY_ID"]
   .filter(k => !process.env[k]?.trim());
 
 if (missing.length) {
@@ -203,7 +206,10 @@ client.on("interactionCreate", async interaction => {
         permissionOverwrites: [
           {
             id: guild.roles.everyone.id,
-            deny: [PermissionFlagsBits.ViewChannel]
+            deny: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages
+            ]
           },
           {
             id: interaction.user.id,
@@ -267,8 +273,7 @@ client.on("interactionCreate", async interaction => {
       const member = interaction.member;
 
       const isStaff =
-        member?.roles?.cache?.has(STAFF_ROLE_ID) ||
-        member?.permissions?.has(PermissionFlagsBits.ManageChannels);
+        member?.roles?.cache?.has(STAFF_ROLE_ID);
 
       const ownerId = channel.topic?.startsWith("ticket-owner:")
         ? channel.topic.split(":")[1]
