@@ -308,7 +308,7 @@ client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === "ticket") {
       const embed = new EmbedBuilder()
-        .setTitle("🎫 Monnashop Ticket")
+        .setTitle("Monnashop Ticket")
         .setDescription(
           "กดปุ่มด้านล่างเพื่อเปิด Ticket\nระบบจะสร้างห้องส่วนตัวให้คุณและทีมงาน"
         )
@@ -317,8 +317,7 @@ client.on("interactionCreate", async interaction => {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("ticket_open")
-          .setLabel("เปิด Ticket")
-          .setEmoji("🎫")
+          .setLabel("เปิด Ti  cket")
           .setStyle(ButtonStyle.Primary)
       );
 
