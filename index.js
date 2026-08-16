@@ -1,14 +1,17 @@
 const {
   Client, GatewayIntentBits, Partials, REST, Routes,
   SlashCommandBuilder, ActionRowBuilder, ButtonBuilder,
-  ButtonStyle, ChannelType, PermissionFlagsBits, EmbedBuilder
+  ButtonStyle, ChannelType, PermissionFlagsBits, EmbedBuilder, AttachmentBuilder
 } = require("discord.js");
 require("dotenv").config();
 
 const { BOT_TOKEN, SERVER_ID, TICKET_CATEGORY_ID } = process.env;
 
-// ยศแอดมินที่สามารถตอบ Ticket ได้
+// ยศแอดมินที่มีสิทธิ์ตอบ/จัดการ Ticket
 const STAFF_ROLE_ID = "1516789795832070315";
+
+// ห้องเก็บประวัติ Ticket ที่ปิดแล้ว
+const TICKET_HISTORY_CHANNEL_ID = "1538476105651195936";
 
 const missing = ["BOT_TOKEN", "SERVER_ID", "TICKET_CATEGORY_ID"]
   .filter(k => !process.env[k]?.trim());
@@ -19,7 +22,11 @@ if (missing.length) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
   partials: [Partials.Channel]
 });
 
@@ -146,6 +153,157 @@ client.once("ready", async () => {
   }
 });
 
+
+async function fetchAllMessages(channel) {
+  const messages = [];
+  let before;
+
+  while (true) {
+    const batch = await channel.messages.fetch({
+      limit: 100,
+      ...(before ? { before } : {})
+    });
+
+    if (!batch.size) break;
+
+    messages.push(...batch.values());
+
+    if (batch.size < 100) break;
+
+    before = batch.last().id;
+  }
+
+  return messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+function cleanTranscriptText(value) {
+  return String(value ?? "")
+    .replace(/@everyone/gi, "@\u200beveryone")
+    .replace(/@here/gi, "@\u200bhere");
+}
+
+function formatTranscriptMessage(message) {
+  const time = new Date(message.createdTimestamp).toLocaleString("th-TH", {
+    timeZone: "Asia/Bangkok",
+    hour12: false
+  });
+
+  const author = message.member?.displayName || message.author?.username || "Unknown";
+  const content = cleanTranscriptText(message.content || "").trim();
+
+  const attachmentLines = [...message.attachments.values()]
+    .map(a => `ไฟล์แนบ: ${a.url}`)
+    .join("\n");
+
+  let body = content || "(ไม่มีข้อความ)";
+  if (attachmentLines) body += `\n${attachmentLines}`;
+
+  return `[${time}] ${author} (${message.author?.id || "unknown"})\n${body}`;
+}
+
+function splitForDiscord(text, maxLength = 1900) {
+  const chunks = [];
+  let current = "";
+
+  for (const line of text.split("\n")) {
+    if ((current + line + "\n").length > maxLength && current) {
+      chunks.push(current.trimEnd());
+      current = "";
+    }
+
+    if (line.length > maxLength) {
+      let rest = line;
+      while (rest.length > maxLength) {
+        chunks.push(rest.slice(0, maxLength));
+        rest = rest.slice(maxLength);
+      }
+      current = rest + "\n";
+    } else {
+      current += line + "\n";
+    }
+  }
+
+  if (current.trim()) chunks.push(current.trimEnd());
+  return chunks;
+}
+
+async function saveTicketTranscript(channel, ticketNumber, ownerId, closedBy) {
+  const historyChannel = await channel.guild.channels.fetch(TICKET_HISTORY_CHANNEL_ID).catch(() => null);
+
+  if (!historyChannel || !historyChannel.isTextBased()) {
+    throw new Error(`ไม่พบห้องเก็บประวัติ Ticket: ${TICKET_HISTORY_CHANNEL_ID}`);
+  }
+
+  const messages = await fetchAllMessages(channel);
+
+  const owner = await channel.guild.members.fetch(ownerId).catch(() => null);
+  const closer = await channel.guild.members.fetch(closedBy).catch(() => null);
+
+  const header = new EmbedBuilder()
+    .setTitle(`📁 TICKET-${String(ticketNumber).padStart(4, "0")} | ประวัติ Ticket`)
+    .setDescription(
+      [
+        `👤 เจ้าของ Ticket: ${owner ? `${owner} (${owner.user.username})` : `<@${ownerId}>`}`,
+        `🛠️ ปิดโดย: ${closer ? `${closer} (${closer.user.username})` : `<@${closedBy}>`}`,
+        `💬 จำนวนข้อความ: ${messages.length}`,
+        `📅 ปิดเมื่อ: <t:${Math.floor(Date.now() / 1000)}:F>`,
+        "",
+        "ประวัติการสนทนาถูกบันทึกไว้ที่นี่ก่อนลบห้อง Ticket"
+      ].join("\n")
+    )
+    .setColor(0x5865f2);
+
+  const historyMessage = await historyChannel.send({ embeds: [header] });
+
+  // สร้าง Thread เพื่อให้แต่ละ Ticket แยกเป็นเรื่องและย้อนดูง่าย
+  let transcriptTarget = historyChannel;
+  try {
+    if (historyMessage.startThread) {
+      transcriptTarget = await historyMessage.startThread({
+        name: `TICKET-${String(ticketNumber).padStart(4, "0")}`,
+        autoArchiveDuration: 10080
+      });
+    }
+  } catch (err) {
+    console.error("Could not create transcript thread:", err);
+  }
+
+  const transcript = messages.length
+    ? messages.map(formatTranscriptMessage).join("\n\n")
+    : "(Ticket นี้ไม่มีข้อความเพิ่มเติม)";
+
+  const chunks = splitForDiscord(transcript);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const prefix = chunks.length > 1
+      ? `**Transcript ${i + 1}/${chunks.length}**\n`
+      : "**Transcript**\n";
+
+    await transcriptTarget.send(prefix + chunks[i]);
+  }
+
+  // เก็บไฟล์ .txt ไว้อีกชั้น เผื่อ Transcript ยาวมาก
+  const txt = [
+    `TICKET-${String(ticketNumber).padStart(4, "0")}`,
+    `Owner ID: ${ownerId}`,
+    `Closed by ID: ${closedBy}`,
+    `Closed at: ${new Date().toISOString()}`,
+    "",
+    transcript
+  ].join("\n");
+
+  await historyChannel.send({
+    content: `📄 ไฟล์สำรอง Transcript ของ TICKET-${String(ticketNumber).padStart(4, "0")}`,
+    files: [
+      new AttachmentBuilder(Buffer.from(txt, "utf8"), {
+        name: `TICKET-${String(ticketNumber).padStart(4, "0")}-transcript.txt`
+      })
+    ]
+  });
+
+  return historyMessage;
+}
+
 client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === "ticket") {
@@ -206,10 +364,7 @@ client.on("interactionCreate", async interaction => {
         permissionOverwrites: [
           {
             id: guild.roles.everyone.id,
-            deny: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages
-            ]
+            deny: [PermissionFlagsBits.ViewChannel]
           },
           {
             id: interaction.user.id,
@@ -273,7 +428,8 @@ client.on("interactionCreate", async interaction => {
       const member = interaction.member;
 
       const isStaff =
-        member?.roles?.cache?.has(STAFF_ROLE_ID);
+        member?.roles?.cache?.has(STAFF_ROLE_ID) ||
+        member?.permissions?.has(PermissionFlagsBits.ManageChannels);
 
       const ownerId = channel.topic?.startsWith("ticket-owner:")
         ? channel.topic.split(":")[1]
@@ -287,9 +443,34 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      await interaction.reply("🔒 กำลังปิด Ticket...");
+      await interaction.reply("🔒 กำลังบันทึกประวัติและปิด Ticket...");
+
+      // ดึงเลข Ticket จากชื่อห้อง เช่น ticket-0001
+      const numberMatch = channel.name.match(/ticket-(\d{4})/i);
+      const ticketNumber = numberMatch ? Number(numberMatch[1]) : 0;
+
+      try {
+        await saveTicketTranscript(
+          channel,
+          ticketNumber,
+          ownerId,
+          interaction.user.id
+        );
+
+        await interaction.editReply(
+          "✅ บันทึกประวัติ Ticket ลงห้องประวัติแล้ว กำลังลบห้อง..."
+        );
+      } catch (transcriptError) {
+        console.error("Transcript error:", transcriptError);
+
+        await interaction.editReply(
+          "❌ บันทึกประวัติไม่สำเร็จ จึงยังไม่ลบ Ticket เพื่อป้องกันข้อมูลหาย"
+        );
+        return;
+      }
+
       setTimeout(
-        () => channel.delete("Ticket closed").catch(console.error),
+        () => channel.delete("Ticket closed - transcript saved").catch(console.error),
         1500
       );
     }
